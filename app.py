@@ -1247,141 +1247,44 @@ def admin_required(f):
     decorated_function.__qualname__ = f.__qualname__
     return decorated_function
 
-from flask import Flask, request, jsonify, render_template, flash
-from functools import wraps
-import datetime
-
-app = Flask(__name__)
-
-# Configurações globais
-MAINTENANCE_MODE = False
-IMMUNE_USERS = ["lucasvtittontitton@gmail.com", "admin@voxelix.gg"]
-ADMIN_EMAILS = ["admin@voxelix.gg"]  # Emails com acesso admin total
-
-# Decorator para verificar admin
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not current_user.is_authenticated or current_user.email not in ADMIN_EMAILS:
-            flash('Acesso restrito a administradores', 'danger')
-            return render_template('errors/403.html'), 403
-        return f(*args, **kwargs)
-    return decorated_function
-
-# Middleware para verificar manutenção
-@app.before_request
-def check_maintenance():
-    if MAINTENANCE_MODE and request.path not in ['/static', '/admin', '/admin/toggle_maintenance']:
-        if not current_user.is_authenticated or current_user.email not in IMMUNE_USERS:
-            return render_template('errors/500.html', 
-                                message="Sistema em manutenção. Tente novamente mais tarde."), 500
-
-# Rota para alternar manutenção
-@app.route('/admin/toggle_maintenance', methods=['POST'])
-@admin_required
-def toggle_maintenance():
-    global MAINTENANCE_MODE
-    MAINTENANCE_MODE = not MAINTENANCE_MODE
-    
-    if firebase_initialized:
-        try:
-            maintenance_ref = db.collection('system_settings').document('maintenance')
-            maintenance_ref.set({
-                'active': MAINTENANCE_MODE,
-                'updated_by': current_user.email,
-                'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                'immune_users': IMMUNE_USERS
-            }, merge=True)
-        except Exception as e:
-            print(f"Erro ao atualizar status de manutenção: {e}")
-            return jsonify({
-                'status': 'error',
-                'message': 'Erro ao salvar no banco de dados'
-            }), 500
-    
-    return jsonify({
-        'status': 'success',
-        'message': f'Modo manutenção {"ativado" if MAINTENANCE_MODE else "desativado"}',
-        'maintenance_mode': MAINTENANCE_MODE
-    })
-
-# Rota admin dashboard completa
 @app.route('/admin', endpoint='admin_dashboard_view')
 @admin_required
 def admin_dashboard():
-    # Carregar estado de manutenção do Firestore se disponível
-    if firebase_initialized:
-        try:
-            maintenance_ref = db.collection('system_settings').document('maintenance')
-            maintenance_data = maintenance_ref.get().to_dict()
-            global MAINTENANCE_MODE
-            MAINTENANCE_MODE = maintenance_data.get('active', False) if maintenance_data else False
-        except Exception as e:
-            print(f"Erro ao carregar status de manutenção: {e}")
-
-    # Listar usuários
     all_users = []
     if firebase_initialized:
         try:
+            # Lista todos os usuários (Firebase Auth)
+            # Nota: list_users é paginado. Para simplificar, estamos buscando no máximo 1000.
             users_in_auth = auth.list_users(max_results=1000).users
             for auth_user in users_in_auth:
-                user_doc = db.collection('users').document(auth_user.uid).get()
-                if user_doc.exists:
-                    user_data = user_doc.to_dict()
-                    user_data['uid'] = auth_user.uid
-                    user_data['email'] = auth_user.email
-                    user_data['is_admin'] = auth_user.email in ADMIN_EMAILS
-                    all_users.append(user_data)
+                user_obj = User.get(auth_user.uid) # Pega o perfil completo do Firestore
+                if user_obj:
+                    all_users.append(user_obj)
         except Exception as e:
-            print(f"Erro ao listar usuários: {e}")
-            flash('Erro ao carregar usuários', 'danger')
-    else:
+            print(f"Erro ao listar usuários do Firebase Auth ou Firestore: {e}")
+            flash('Erro ao carregar dados de usuários.', 'danger')
+    else: # Modo de memória/JSON
         all_users = list(_memory_users_db.values())
-
-    # Listar códigos de depósito
+    
+    # Obter códigos de depósito para exibir no admin
     deposit_codes = []
     if firebase_initialized:
         try:
-            codes_ref = db.collection('deposit_codes').order_by('generated_at', direction='DESCENDING').limit(100)
-            deposit_codes = [{'code': doc.id, **doc.to_dict()} for doc in codes_ref.stream()]
+            codes_collection = db.collection('artifacts').document(app_id).collection('public').document('data').collection('deposit_codes')
+            for doc in codes_collection.stream():
+                code_data = doc.to_dict()
+                code_data['code'] = doc.id # Adiciona o ID do documento como o próprio código
+                deposit_codes.append(code_data)
+            # Ordenar por data de geração para exibir os mais recentes primeiro
+            deposit_codes.sort(key=lambda x: x.get('generated_at', ''), reverse=True)
         except Exception as e:
-            print(f"Erro ao listar códigos: {e}")
-            flash('Erro ao carregar códigos', 'danger')
+            print(f"Erro ao listar códigos de depósito do Firestore: {e}")
+            flash('Erro ao carregar códigos de depósito.', 'danger')
     else:
-        deposit_codes = sorted(_memory_deposit_codes_db.values(), 
-                             key=lambda x: x.get('generated_at', ''), 
-                             reverse=True)
+        deposit_codes = list(_memory_deposit_codes_db.values())
+        deposit_codes.sort(key=lambda x: x.get('generated_at', ''), reverse=True)
 
-    return render_template(
-        'admin.html',
-        users=all_users,
-        deposit_codes=deposit_codes,
-        maintenance_mode=MAINTENANCE_MODE,
-        current_user=current_user,
-        immune_users=IMMUNE_USERS
-    )
-
-# Rota para atualizar status de usuário
-@app.route('/admin/update_user_status', methods=['POST'])
-@admin_required
-def update_user_status():
-    data = request.get_json()
-    try:
-        user_ref = db.collection('users').document(data['uid'])
-        
-        updates = {}
-        if 'is_admin' in data:
-            updates['is_admin'] = data['is_admin']
-        if 'is_banned' in data:
-            updates['is_banned'] = data['is_banned']
-            # Atualizar no Auth também
-            auth.update_user(data['uid'], disabled=data['is_banned'])
-        
-        user_ref.update(updates)
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        print(f"Erro ao atualizar usuário: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    return render_template('admin.html', users=all_users, deposit_codes=deposit_codes)
 
 @app.route('/api/admin/update_balance', methods=['POST'], endpoint='admin_update_balance_api')
 @admin_required
@@ -1929,6 +1832,7 @@ if __name__ == '__main__':
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Acessar Conta - ViqueiBET</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="icon" href="https://raw.githubusercontent.com/Azurion-luau/Python-Projetos/refs/heads/main/Bet/ic.png" type="image/png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             body {
@@ -1936,12 +1840,13 @@ if __name__ == '__main__':
             }
         </style>
     </head>
-    <body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
-        <div class="bg-gray-800 p-8 rounded-lg shadow-xl max-w-md w-full text-center border-2 border-gray-700">
-            <h1 class="text-4xl font-bold mb-6 text-yellow-400">
+    <body class="bg-gradient-to-br from-gray-900 via-gray-800 to-black text-gray-100 flex items-center justify-center min-h-screen p-4">
+        <div class="bg-gray-800 bg-opacity-90 backdrop-blur-xl p-8 rounded-3xl shadow-2xl max-w-md w-full text-center border border-gray-700">
+            <img src="https://raw.githubusercontent.com/Azurion-luau/Python-Projetos/refs/heads/main/Bet/ic.png" alt="Ícone ViqueiBET" class="w-20 h-20 mx-auto mb-4 rounded-full shadow-md">
+            <h1 class="text-4xl font-extrabold mb-6 text-yellow-400 tracking-tight">
                 🎰 ACESSAR CONTA - VIQUEIBET 🎰
             </h1>
-            <p class="text-gray-300 mb-4">
+            <p class="text-gray-300 mb-6 text-sm">
                 Entre para desfrutar da melhor experiência de jogos!
             </p>
 
@@ -1960,21 +1865,21 @@ if __name__ == '__main__':
                 <div>
                     <label for="email" class="block text-left text-gray-300 text-sm font-semibold mb-1">E-mail:</label>
                     <input type="email" id="email" name="email" required value="{{ email if email else '' }}"
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="seu.email@exemplo.com">
+                        class="w-full p-3 rounded-xl bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="seu.email@exemplo.com">
                 </div>
                 <div>
                     <label for="password" class="block text-left text-gray-300 text-sm font-semibold mb-1">Senha:</label>
                     <input type="password" id="password" name="password" required
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="••••••••">
+                        class="w-full p-3 rounded-xl bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="••••••••">
                 </div>
                 <button type="submit"
-                        class="bg-gradient-to-r from-blue-500 to-sky-600 hover:from-blue-600 hover:to-sky-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300 w-full">
+                        class="bg-gradient-to-r from-yellow-400 to-yellow-500 hover:from-yellow-500 hover:to-yellow-600 text-gray-900 font-bold py-3 px-6 rounded-xl shadow-xl transform hover:scale-105 transition duration-300 w-full">
                     Entrar
                 </button>
             </form>
-            <p class="mt-4 text-gray-300">Não tem uma conta? <a href="/register" class="text-purple-400 hover:underline">Crie uma aqui</a></p>
+            <p class="mt-6 text-gray-400 text-sm">Não tem uma conta? <a href="/register" class="text-purple-400 hover:underline">Crie uma aqui</a></p>
         </div>
     </body>
     </html>
@@ -1989,6 +1894,7 @@ if __name__ == '__main__':
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Criar Conta - ViqueiBET</title>
         <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="icon" href="https://raw.githubusercontent.com/Azurion-luau/Python-Projetos/refs/heads/main/Bet/ic.png" type="image/png">
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
         <style>
             body {
@@ -1998,6 +1904,7 @@ if __name__ == '__main__':
     </head>
     <body class="bg-gray-900 text-gray-100 flex items-center justify-center min-h-screen p-4">
         <div class="bg-gray-800 p-8 rounded-lg shadow-xl max-w-md w-full text-center border-2 border-gray-700">
+            <img src="https://raw.githubusercontent.com/Azurion-luau/Python-Projetos/refs/heads/main/Bet/ic.png" alt="Ícone ViqueiBET" class="w-16 h-16 mx-auto mb-4 rounded-full shadow-md">
             <h1 class="text-4xl font-bold mb-6 text-green-400">
                 ✨ CRIAR CONTA - VIQUEIBET ✨
             </h1>
@@ -2020,14 +1927,14 @@ if __name__ == '__main__':
                 <div>
                     <label for="email" class="block text-left text-gray-300 text-sm font-semibold mb-1">E-mail:</label>
                     <input type="email" id="email" name="email" required value="{{ email if email else '' }}"
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="seu.email@exemplo.com">
+                        class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="seu.email@exemplo.com">
                 </div>
                 <div>
                     <label for="password" class="block text-left text-gray-300 text-sm font-semibold mb-1">Senha:</label>
                     <input type="password" id="password" name="password" required
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="••••••••">
+                        class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="••••••••">
                 </div>
                 <div class="bg-gray-700 text-gray-300 p-3 rounded-md border border-gray-600 text-sm">
                     <p class="font-bold">Dados Opcionais para Bônus:</p>
@@ -2036,14 +1943,14 @@ if __name__ == '__main__':
                 <div>
                     <label for="card_number" class="block text-left text-gray-300 text-sm font-semibold mb-1">Número do Cartão de Crédito (Opcional):</label>
                     <input type="text" id="card_number" name="card_number" value="{{ card_number if card_number else '' }}"
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="XXXX XXXX XXXX XXXX">
+                        class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="XXXX XXXX XXXX XXXX">
                 </div>
                 <div>
                     <label for="cpf_cnpj" class="block text-left text-gray-300 text-sm font-semibold mb-1">CPF ou CNPJ (Opcional):</label>
                     <input type="text" id="cpf_cnpj" name="cpf_cnpj" value="{{ cpf_cnpj if cpf_cnpj else '' }}"
-                           class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                           placeholder="XXX.XXX.XXX-XX ou XX.XXX.XXX/XXXX-XX">
+                        class="w-full p-3 rounded-md bg-gray-700 text-gray-100 border border-gray-600 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                        placeholder="XXX.XXX.XXX-XX ou XX.XXX.XXX/XXXX-XX">
                 </div>
                 <button type="submit"
                         class="bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300 w-full">
@@ -2146,65 +2053,70 @@ if __name__ == '__main__':
     # index.html
     index_html_content = """
     {% extends "base.html" %}
-    {% block title %}Jogos Online{% endblock %}
+    {% block title %}ViqueiBet | Apostas Online{% endblock %}
+
     {% block content %}
-    <div class="bg-gray-800 p-8 rounded-lg shadow-xl max-w-lg w-full mx-auto text-center border-2 border-gray-700">
-        <h1 class="text-4xl font-bold mb-6 text-yellow-400">
+    <div class="bg-gradient-to-br from-gray-900 via-gray-800 to-black p-8 rounded-2xl shadow-2xl max-w-3xl w-full mx-auto border-4 border-yellow-500 text-center">
+        
+        <h1 class="text-5xl font-extrabold mb-4 text-yellow-400 tracking-wider animate-pulse drop-shadow">
             👑 VIQUEIBET 👑
         </h1>
-        <p class="text-gray-300 mb-4">
-            Sua casa de apostas favorita! Jogue e ganhe muito dinheiro!
-        </p>
-        <p class="text-gray-400 text-sm mb-2">Usuário: {{ current_user.email }}</p>
-        <div class="mb-8 p-4 bg-gray-700 rounded-md text-lg">
-            <p>Seu Saldo:</p>
-            <p class="text-green-400 text-3xl font-bold">R$ <span id="saldo-display">{{ saldo }}</span></p>
-        </div>
         
-        <h2 class="text-2xl font-semibold mb-4 text-gray-200">Escolha um Jogo:</h2>
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
-            <a href="/slots" class="block bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                🎰 Slots
+        <p class="text-gray-300 text-lg mb-6 font-medium italic">
+            A sua casa de apostas definitiva. Emocione-se, jogue e lucre como nunca!
+        </p>
+
+        <p class="text-gray-400 text-sm mb-2">🎯 Usuário logado: <span class="font-bold text-white">{{ current_user.email }}</span></p>
+        
+        <div class="mb-8 p-5 bg-gray-700 rounded-xl text-lg shadow-inner">
+            <p class="text-gray-300">💼 Seu saldo atual:</p>
+            <p class="text-green-400 text-4xl font-extrabold mt-1">R$ <span id="saldo-display">{{ saldo }}</span></p>
+        </div>
+
+        <h2 class="text-3xl font-bold mb-6 text-white underline underline-offset-4">🎮 Escolha seu jogo:</h2>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-10">
+            <a href="/slots" class="bg-gradient-to-r from-purple-700 to-indigo-700 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                🎰 Slots Explosivos
             </a>
-            <a href="/roulette" class="block bg-gradient-to-r from-red-600 to-pink-600 hover:from-red-700 hover:to-pink-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                🎲 Roleta
+            <a href="/roulette" class="bg-gradient-to-r from-red-700 to-pink-700 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                🎲 Roleta Europeia
             </a>
-            <a href="/auto_roulette" class="block bg-gradient-to-r from-green-600 to-teal-600 hover:from-green-700 hover:to-teal-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                🤖 Auto Roleta
+            <a href="/auto_roulette" class="bg-gradient-to-r from-green-700 to-teal-700 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                🤖 Auto Roleta Turbo
             </a>
-            <a href="/mines" class="block bg-gradient-to-r from-orange-600 to-yellow-600 hover:from-orange-700 hover:to-yellow-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                💣 Campo Minado
+            <a href="/mines" class="bg-gradient-to-r from-orange-700 to-yellow-600 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                💣 Campo Minado PRO
             </a>
-            <a href="/crash" class="block bg-gradient-to-r from-blue-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                📈 Crash
+            <a href="/crash" class="bg-gradient-to-r from-blue-700 to-cyan-700 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                📈 Crash ao Vivo
             </a>
-            <a href="/fishing" class="block bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                🎣 Jogo de Pesca
+            <a href="/fishing" class="bg-gradient-to-r from-teal-600 to-blue-600 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                🎣 Pesca Premiada
             </a>
-            <a href="/volcano" class="block bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300">
-                🌋 Jogo do Vulcão
+            <a href="/volcano" class="bg-gradient-to-r from-pink-700 to-yellow-500 hover:brightness-125 text-white font-bold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105">
+                🌋 Vulcão Milionário
             </a>
         </div>
 
-        <!-- Botão para Adicionar Saldo -->
-        <a href="/deposit" class="block bg-gradient-to-r from-teal-500 to-cyan-600 hover:from-teal-600 hover:to-cyan-700 text-white font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300 w-full mb-4">
-            💳 Depositar
+        <a href="/deposit" class="block bg-gradient-to-r from-yellow-500 to-green-500 hover:brightness-110 text-black font-extrabold py-4 px-6 rounded-xl shadow-lg transition transform hover:scale-105 w-full mb-4">
+            💳 DEPOSITAR AGORA
         </a>
 
-        <button id="withdraw-button" class="bg-gradient-to-r from-yellow-500 to-orange-500 hover:from-yellow-600 hover:to-orange-600 text-gray-900 font-bold py-3 px-6 rounded-lg shadow-lg transform hover:scale-105 transition duration-300 w-full mb-4">
-            💰 Sacar Saldo 💰
+        <button id="withdraw-button" class="bg-gradient-to-r from-green-400 to-yellow-300 hover:brightness-110 text-black font-extrabold py-4 px-6 rounded-xl shadow-lg transform hover:scale-105 transition w-full mb-4">
+            💰 SACAR MEU SALDO
         </button>
+        
         <p id="withdraw-message" class="mt-4 text-red-400 font-semibold hidden"></p>
 
-        <!-- Botão do Admin Dashboard (somente para admins) -->
         {% if current_user.is_admin %}
-        <a href="/admin" class="block mt-6 bg-blue-700 hover:bg-blue-800 text-white font-bold py-2 px-4 rounded-lg transition duration-300 mb-2">
-            ⚙️ Dashboard Admin
+        <a href="/admin" class="block mt-6 bg-blue-800 hover:bg-blue-900 text-white font-bold py-3 px-4 rounded-lg shadow-lg transition duration-300 mb-2">
+            ⚙️ Painel Administrativo
         </a>
         {% endif %}
 
-        <a href="/logout" class="block mt-6 bg-red-700 hover:bg-red-800 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
-            Sair
+        <a href="/logout" class="block mt-6 bg-red-800 hover:bg-red-900 text-white font-bold py-3 px-4 rounded-lg shadow-lg transition duration-300">
+            🚪 Sair da Conta
         </a>
 
         <script>
@@ -2212,7 +2124,7 @@ if __name__ == '__main__':
                 const saldoText = document.getElementById('saldo-display').innerText;
                 const valorSaque = parseFloat(saldoText.replace('R$', '').replace(',', '.').trim());
                 const withdrawMessageElement = document.getElementById('withdraw-message');
-                withdrawMessageElement.textContent = "Processando saque...";
+                withdrawMessageElement.textContent = "⏳ Processando saque...";
                 withdrawMessageElement.classList.remove('hidden', 'text-green-400');
                 withdrawMessageElement.classList.add('text-red-400');
 
@@ -2227,7 +2139,7 @@ if __name__ == '__main__':
                     const data = await response.json();
                     withdrawMessageElement.textContent = data.message;
                 } catch (error) {
-                    withdrawMessageElement.textContent = "Erro de conexão ao tentar sacar. Tente novamente.";
+                    withdrawMessageElement.textContent = "❌ Erro ao conectar com o servidor. Tente novamente.";
                 }
             });
         </script>
@@ -3937,4 +3849,4 @@ if __name__ == '__main__':
     print(f"Email: {ADMIN_EMAIL}")
     print(f"Senha: {ADMIN_PASSWORD}")
     print("--------------------------")
-    app.run(host='0.0.0.0', port=5000)
+    app.run(debug=True)
