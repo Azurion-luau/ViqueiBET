@@ -15,7 +15,7 @@ import uuid # Para gerar códigos únicos
 app = Flask(__name__)
 # MUITO IMPORTANTE: Mude esta chave secreta para um valor complexo e único em produção!
 # É usada para proteger as sessões do usuário.
-app.secret_key = 'uma_chave_secreta_muito_segura_e_longa_para_este_exemplo_de_casino_com_login_secreto'
+app.secret_key = 'azurionkeysupremetoforeversave' # Chave secreta atualizada
 
 # --- Configuração do Flask-Login ---
 login_manager = LoginManager()
@@ -137,7 +137,7 @@ def load_deposit_codes_from_json():
 def save_deposit_codes_to_json(codes_dict):
     """Salva os códigos de depósito em um arquivo JSON."""
     try:
-        with open(DEPOSIT_CODES_JSON_FILE, 'w', encoding='utf-8') as f:
+        with open(DEPOSIT_JSON_FILE, 'w', encoding='utf-8') as f:
             json.dump(codes_dict, f, indent=4, ensure_ascii=False)
         return True
     except Exception as e:
@@ -232,7 +232,7 @@ if not firebase_initialized:
     
 # --- Pré-registro do Admin (ou busca no Firebase Auth / memória/JSON) ---
 ADMIN_EMAIL = "admin@voxelix.gg"
-ADMIN_PASSWORD = "adminpassword123" # Uma senha de administrador mais forte para Firebase Auth
+ADMIN_PASSWORD = "bikeadm%" # Senha de administrador atualizada
 
 if firebase_initialized:
     try:
@@ -290,22 +290,30 @@ def login():
                     user_obj = User.get(auth_user.uid)
                 else: # Para outros usuários ou admin com senha Firebase Auth
                     try:
-                        auth_user = auth.sign_in_with_email_and_password(email, password) # Isso não existe no Admin SDK, só para clientes
-                        # No Admin SDK, você primeiro autenticaria via Firebase Auth para verificar a senha
-                        # ou usaria signInWithCustomToken no frontend com um token gerado pelo backend.
-                        # Para este backend, estamos simulando a autenticação.
-                        # Se você está usando auth.get_user_by_email, então a senha está sendo tratada via password_hash para não-Firebase users
-                        # e para admin, é a senha hardcoded.
-                        # Vamos usar auth.get_user_by_email e checar a senha apenas para o caso de fallback/admin hardcoded.
+                        # Em um app real, a autenticação do Firebase seria feita no frontend
+                        # usando a SDK JS do Firebase Auth. No backend, você verificaria o token de ID.
+                        # Para esta simulação, estamos tratando o login como se fosse uma verificação direta.
+                        auth_user = auth.get_user_by_email(email) # Tenta obter o usuário pelo email
+                        # Se a senha não é do admin hardcoded, ela precisa ser verificada
+                        # por um serviço de autenticação real ou um hash armazenado.
+                        # Como estamos em um exemplo de backend, a autenticação via auth.get_user_by_email
+                        # não verifica a senha. A verificação da senha precisa ser feita separadamente
+                        # ou através de um processo de sign-in de cliente que retorne um token.
+                        # Para este propósito, vamos tratar o login do admin como hardcoded e outros como base de dados.
+                        # **AVISO**: Isso NÃO é uma implementação de autenticação segura para produção.
                         
-                        # Para um aplicativo Flask + Firebase Auth, o login real geralmente
-                        # envolve o cliente enviando credenciais para o Firebase Auth (no frontend)
-                        # e recebendo um token de ID, que é então enviado para o backend para verificação
-                        # e criação da sessão Flask.
-                        # Aqui, estamos simulando o login de backend para fins de demonstração.
-                        
-                        auth_user = auth.get_user_by_email(email)
-                        user_obj = User.get(auth_user.uid)
+                        # Simulação de verificação de senha para usuários não-admin no Firebase (se houver uma maneira de obter a senha)
+                        # Como não podemos obter a senha no Firebase Admin SDK, este bloco é apenas um placeholder.
+                        # A validação real viria do frontend com um token de ID do Firebase Auth.
+                        user_obj = User.get(auth_user.uid) # Pega o perfil Firestore
+                        if user_obj:
+                            # Se for o admin, a senha já foi verificada pelo if acima.
+                            # Para usuários normais, a senha precisa ser verificada no frontend via Firebase Auth.
+                            pass # Assume que o Firebase Auth já verificou no cliente, ou a senha é hardcoded para admin.
+                        else:
+                            flash('E-mail não registrado.', 'danger')
+                            return render_template('login.html', email=email)
+
                     except auth.UserNotFoundError:
                         flash('E-mail não registrado.', 'danger')
                         return render_template('login.html', email=email)
@@ -971,7 +979,7 @@ def api_crash_start_game():
             print(f"Crash forced win: Crash point set to {crash_point:.2f}")
         elif forced_setting['outcome'] == 'lose':
             crash_point = 1.0 + random.uniform(0.01, 0.1) # Crash almost immediately
-            print(f"Crash forced lose: Crash point set to {crash_point:.2f}")
+            print(f"Crash forced lose: Crash point point set to {crash_point:.2f}")
 
     session['crash_game_state'] = {
         'bet_amount': bet_amount,
@@ -1239,44 +1247,141 @@ def admin_required(f):
     decorated_function.__qualname__ = f.__qualname__
     return decorated_function
 
+from flask import Flask, request, jsonify, render_template, flash
+from functools import wraps
+import datetime
+
+app = Flask(__name__)
+
+# Configurações globais
+MAINTENANCE_MODE = False
+IMMUNE_USERS = ["lucasvtittontitton@gmail.com", "admin@voxelix.gg"]
+ADMIN_EMAILS = ["admin@voxelix.gg"]  # Emails com acesso admin total
+
+# Decorator para verificar admin
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not current_user.is_authenticated or current_user.email not in ADMIN_EMAILS:
+            flash('Acesso restrito a administradores', 'danger')
+            return render_template('errors/403.html'), 403
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Middleware para verificar manutenção
+@app.before_request
+def check_maintenance():
+    if MAINTENANCE_MODE and request.path not in ['/static', '/admin', '/admin/toggle_maintenance']:
+        if not current_user.is_authenticated or current_user.email not in IMMUNE_USERS:
+            return render_template('errors/500.html', 
+                                message="Sistema em manutenção. Tente novamente mais tarde."), 500
+
+# Rota para alternar manutenção
+@app.route('/admin/toggle_maintenance', methods=['POST'])
+@admin_required
+def toggle_maintenance():
+    global MAINTENANCE_MODE
+    MAINTENANCE_MODE = not MAINTENANCE_MODE
+    
+    if firebase_initialized:
+        try:
+            maintenance_ref = db.collection('system_settings').document('maintenance')
+            maintenance_ref.set({
+                'active': MAINTENANCE_MODE,
+                'updated_by': current_user.email,
+                'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'immune_users': IMMUNE_USERS
+            }, merge=True)
+        except Exception as e:
+            print(f"Erro ao atualizar status de manutenção: {e}")
+            return jsonify({
+                'status': 'error',
+                'message': 'Erro ao salvar no banco de dados'
+            }), 500
+    
+    return jsonify({
+        'status': 'success',
+        'message': f'Modo manutenção {"ativado" if MAINTENANCE_MODE else "desativado"}',
+        'maintenance_mode': MAINTENANCE_MODE
+    })
+
+# Rota admin dashboard completa
 @app.route('/admin', endpoint='admin_dashboard_view')
 @admin_required
 def admin_dashboard():
+    # Carregar estado de manutenção do Firestore se disponível
+    if firebase_initialized:
+        try:
+            maintenance_ref = db.collection('system_settings').document('maintenance')
+            maintenance_data = maintenance_ref.get().to_dict()
+            global MAINTENANCE_MODE
+            MAINTENANCE_MODE = maintenance_data.get('active', False) if maintenance_data else False
+        except Exception as e:
+            print(f"Erro ao carregar status de manutenção: {e}")
+
+    # Listar usuários
     all_users = []
     if firebase_initialized:
         try:
-            # Lista todos os usuários (Firebase Auth)
-            # Nota: list_users é paginado. Para simplificar, estamos buscando no máximo 1000.
             users_in_auth = auth.list_users(max_results=1000).users
             for auth_user in users_in_auth:
-                user_obj = User.get(auth_user.uid) # Pega o perfil completo do Firestore
-                if user_obj:
-                    all_users.append(user_obj)
+                user_doc = db.collection('users').document(auth_user.uid).get()
+                if user_doc.exists:
+                    user_data = user_doc.to_dict()
+                    user_data['uid'] = auth_user.uid
+                    user_data['email'] = auth_user.email
+                    user_data['is_admin'] = auth_user.email in ADMIN_EMAILS
+                    all_users.append(user_data)
         except Exception as e:
-            print(f"Erro ao listar usuários do Firebase Auth ou Firestore: {e}")
-            flash('Erro ao carregar dados de usuários.', 'danger')
-    else: # Modo de memória/JSON
+            print(f"Erro ao listar usuários: {e}")
+            flash('Erro ao carregar usuários', 'danger')
+    else:
         all_users = list(_memory_users_db.values())
-    
-    # Obter códigos de depósito para exibir no admin
+
+    # Listar códigos de depósito
     deposit_codes = []
     if firebase_initialized:
         try:
-            codes_collection = db.collection('artifacts').document(app_id).collection('public').document('data').collection('deposit_codes')
-            for doc in codes_collection.stream():
-                code_data = doc.to_dict()
-                code_data['code'] = doc.id # Adiciona o ID do documento como o próprio código
-                deposit_codes.append(code_data)
-            # Ordenar por data de geração para exibir os mais recentes primeiro
-            deposit_codes.sort(key=lambda x: x.get('generated_at', ''), reverse=True)
+            codes_ref = db.collection('deposit_codes').order_by('generated_at', direction='DESCENDING').limit(100)
+            deposit_codes = [{'code': doc.id, **doc.to_dict()} for doc in codes_ref.stream()]
         except Exception as e:
-            print(f"Erro ao listar códigos de depósito do Firestore: {e}")
-            flash('Erro ao carregar códigos de depósito.', 'danger')
+            print(f"Erro ao listar códigos: {e}")
+            flash('Erro ao carregar códigos', 'danger')
     else:
-        deposit_codes = list(_memory_deposit_codes_db.values())
-        deposit_codes.sort(key=lambda x: x.get('generated_at', ''), reverse=True)
+        deposit_codes = sorted(_memory_deposit_codes_db.values(), 
+                             key=lambda x: x.get('generated_at', ''), 
+                             reverse=True)
 
-    return render_template('admin.html', users=all_users, deposit_codes=deposit_codes)
+    return render_template(
+        'admin.html',
+        users=all_users,
+        deposit_codes=deposit_codes,
+        maintenance_mode=MAINTENANCE_MODE,
+        current_user=current_user,
+        immune_users=IMMUNE_USERS
+    )
+
+# Rota para atualizar status de usuário
+@app.route('/admin/update_user_status', methods=['POST'])
+@admin_required
+def update_user_status():
+    data = request.get_json()
+    try:
+        user_ref = db.collection('users').document(data['uid'])
+        
+        updates = {}
+        if 'is_admin' in data:
+            updates['is_admin'] = data['is_admin']
+        if 'is_banned' in data:
+            updates['is_banned'] = data['is_banned']
+            # Atualizar no Auth também
+            auth.update_user(data['uid'], disabled=data['is_banned'])
+        
+        user_ref.update(updates)
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        print(f"Erro ao atualizar usuário: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/admin/update_balance', methods=['POST'], endpoint='admin_update_balance_api')
 @admin_required
@@ -1470,6 +1575,56 @@ def api_admin_generate_deposit_code():
     print(f"ADMIN {current_user.email} - {message}")
     return jsonify({"status": "success", "message": message, "generated_codes": generated_codes_info})
 
+@app.route('/api/admin/delete_user', methods=['POST'], endpoint='admin_delete_user_api')
+@admin_required
+def api_admin_delete_user():
+    data = request.get_json()
+    user_email = data.get('email')
+
+    if not user_email:
+        return jsonify({"status": "error", "message": "E-mail do usuário não fornecido."}), 400
+
+    if user_email == current_user.email:
+        return jsonify({"status": "error", "message": "Você não pode deletar sua própria conta de administrador."}), 400
+
+    target_user_uid = None
+    if firebase_initialized:
+        try:
+            auth_user = auth.get_user_by_email(user_email)
+            target_user_uid = auth_user.uid
+        except auth.UserNotFoundError:
+            return jsonify({"status": "error", "message": "Usuário não encontrado no Firebase Auth."}), 404
+        except Exception as e:
+            print(f"Erro ao buscar usuário no Firebase Auth para exclusão: {e}")
+            return jsonify({"status": "error", "message": f"Erro ao buscar usuário para exclusão: {e}"}), 500
+    else: # Modo de memória/JSON
+        if user_email not in _memory_users_db:
+            return jsonify({"status": "error", "message": "Usuário não encontrado na memória."}), 404
+        target_user_uid = user_email # No modo de memória, o UID é o email
+
+    try:
+        if firebase_initialized:
+            # 1. Deletar perfil do Firestore
+            user_profile_ref = User.get_user_doc_ref(target_user_uid)
+            if user_profile_ref:
+                user_profile_ref.delete()
+            
+            # 2. Deletar do Firebase Authentication
+            auth.delete_user(target_user_uid)
+        else:
+            # Deletar da memória e salvar no JSON
+            if user_email in _memory_users_db:
+                del _memory_users_db[user_email]
+                save_users_to_json(_memory_users_db)
+
+        message = f"Usuário {user_email} deletado com sucesso."
+        print(f"ADMIN {current_user.email} - {message}")
+        return jsonify({"status": "success", "message": message})
+
+    except Exception as e:
+        print(f"Erro ao deletar usuário {user_email}: {e}")
+        return jsonify({"status": "error", "message": f"Erro ao deletar usuário: {e}"}), 500
+
 
 if __name__ == '__main__':
     # Cria os diretórios para templates e static se não existirem
@@ -1523,6 +1678,102 @@ if __name__ == '__main__':
                 .content-area {
                     margin-left: 256px; /* Offset para a sidebar */
                 }
+            }
+            /* Estilos específicos para o Campo Minado */
+            #game-board {
+                display: grid;
+                grid-template-columns: repeat(5, 1fr);
+                grid-gap: 8px;
+                width: 100%;
+                max-width: 320px; /* Ajuste para o tamanho do tabuleiro */
+                margin: 0 auto;
+            }
+            .tile {
+                width: 60px; /* Tamanho do tile */
+                height: 60px; /* Tamanho do tile */
+                background-color: #4a5568; /* gray-700 */
+                border-radius: 8px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 2em;
+                font-weight: bold;
+                cursor: pointer;
+                transition: background-color 0.2s, transform 0.1s;
+                user-select: none; /* Evita seleção de texto */
+            }
+            .tile:hover {
+                background-color: #64748b; /* gray-600 */
+                transform: scale(1.02);
+            }
+            .tile.revealed {
+                background-color: #2b6cb0; /* blue-700 */
+                cursor: default;
+                color: #e2e8f0; /* gray-200 */
+            }
+            .tile.mine {
+                background-color: #e53e3e; /* red-600 */
+                cursor: default;
+                color: #fff;
+            }
+            .tile.exploded {
+                background-color: #c53030; /* red-700 */
+                animation: pulse-red 0.5s infinite alternate;
+            }
+            .tile.diamond {
+                background-color: #38a169; /* green-600 */
+                color: #fff;
+            }
+            .tile.hidden-mine { /* For mines not clicked but revealed at end */
+                background-color: #a0aec0; /* gray-400 */
+                color: #000;
+            }
+            #game-board.cashed-out .tile.mine {
+                background-color: #a0aec0; /* gray-400 */
+                color: #000;
+            }
+            @keyframes pulse-red {
+                from { box-shadow: 0 0 0px rgba(255, 0, 0, 0.7); }
+                to { box-shadow: 0 0 15px rgba(255, 0, 0, 1); }
+            }
+            /* Estilos específicos para o Crash */
+            #multiplier-graph {
+                height: 150px;
+                background-color: #1a202c; /* bg-gray-900 */
+                border-radius: 8px;
+                position: relative;
+                overflow: hidden;
+                margin-top: 20px;
+                border: 1px solid #4a5568; /* gray-700 */
+            }
+            #graph-line {
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                width: 100%;
+                height: 5px;
+                background-color: #48bb78; /* green-500 */
+                transform-origin: left;
+                transition: transform 0.1s linear; /* Smooth growth */
+            }
+            #current-multiplier-display {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                font-size: 3.5em;
+                font-weight: bold;
+                color: #48bb78; /* green-500 */
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+                transition: color 0.1s ease-in-out;
+            }
+            #multiplier-graph.crashed-effect #current-multiplier-display {
+                color: #e53e3e; /* red-600 */
+                animation: crash-pulse 0.5s infinite alternate;
+            }
+            @keyframes crash-pulse {
+                from { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+                to { transform: translate(-50%, -50%) scale(1.1); opacity: 0.7; }
             }
         </style>
     </head>
@@ -2226,7 +2477,7 @@ if __name__ == '__main__':
         <div class="mb-6">
             <label for="intervalo-rolagem" class="block text-lg font-semibold mb-2">Intervalo entre Rolagens (segundos):</label>
             <input type="number" id="intervalo-rolagem" value="3" min="1" max="10" step="1"
-                   class="p-2 rounded-md bg-gray-700 text-gray-100 border border-gray-600 w-full focus:outline-none focus:ring-2 focus:ring-blue-500">
+                   class="w-full p-2 rounded-md bg-gray-700 text-gray-100 border border-gray-600 w-full focus:outline-none focus:ring-2 focus:ring-blue-500">
         </div>
 
         <div class="flex space-x-4 mb-4">
@@ -3129,6 +3380,7 @@ if __name__ == '__main__':
                         <th scope="col" class="py-3 px-6">Ban Status</th>
                         <th scope="col" class="py-3 px-6">Gerenciar Saldo</th>
                         <th scope="col" class="py-3 px-6">Forçar Jogo</th>
+                        <th scope="col" class="py-3 px-6">Ações</th> <!-- Nova coluna para deletar -->
                     </tr>
                 </thead>
                 <tbody>
@@ -3176,6 +3428,15 @@ if __name__ == '__main__':
                                 <button class="clear-force-btn bg-gray-500 hover:bg-gray-600 text-white font-bold py-1 px-2 rounded-md text-xs transition duration-150 mt-2" data-user-email="{{ user.email }}">Limpar Força</button>
                                 <p class="force-message text-xs mt-1 text-yellow-300">{% if user.forced_game_outcome.game_type %}Forçado: {{ user.forced_game_outcome.game_type }} - {{ user.forced_game_outcome.outcome }}{% else %}N/A{% endif %}</p>
                             </div>
+                        </td>
+                        <td class="py-4 px-6">
+                            {% if user.email != current_user.email %}
+                            <button class="delete-user-btn bg-red-800 hover:bg-red-900 text-white font-bold py-2 px-4 rounded-md text-xs transition duration-150" data-user-email="{{ user.email }}">
+                                Deletar
+                            </button>
+                            {% else %}
+                            <span class="text-gray-500">N/A</span>
+                            {% endif %}
                         </td>
                     </tr>
                     {% endfor %}
@@ -3593,6 +3854,47 @@ if __name__ == '__main__':
                     generateCodesBtn.disabled = false;
                 }
             });
+
+            // --- Deletar Usuário ---
+            document.querySelectorAll('.delete-user-btn').forEach(button => {
+                button.addEventListener('click', async (event) => {
+                    const userEmail = event.target.dataset.userEmail;
+                    const confirmDelete = confirm(`Tem certeza que deseja DELETAR o usuário ${userEmail}? Esta ação é irreversível.`);
+                    
+                    if (confirmDelete) {
+                        try {
+                            const response = await fetch('/api/admin/delete_user', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ email: userEmail })
+                            });
+                            const data = await response.json();
+
+                            const messageElement = event.target.closest('td').querySelector('.delete-message') || 
+                                document.createElement('p');
+                            if (!messageElement.classList.contains('delete-message')) {
+                                messageElement.classList.add('delete-message', 'text-xs', 'mt-1', 'font-semibold');
+                                event.target.closest('td').appendChild(messageElement);
+                            }
+
+                            messageElement.textContent = data.message;
+                            if (data.status === 'success') {
+                                messageElement.classList.remove('text-red-400');
+                                messageElement.classList.add('text-green-400');
+                                // Remove the row from the table on successful deletion
+                                event.target.closest('tr').remove();
+                            } else {
+                                messageElement.classList.remove('text-green-400');
+                                messageElement.classList.add('text-red-400');
+                            }
+                        } catch (error) {
+                            alert("Erro de conexão ao deletar usuário."); // Usando alert temporariamente para erro crítico de rede
+                            console.error("Erro ao deletar usuário:", error);
+                        }
+                    }
+                });
+            });
+
         </script>
     </div>
     {% endblock %}
